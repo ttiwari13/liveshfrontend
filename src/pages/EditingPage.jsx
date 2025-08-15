@@ -1,4 +1,3 @@
-// ===== FILE EDITOR PAGE COMPONENT (Updated with Fixed Scrollable Sidebar) =====
 import React, { useState, useEffect } from "react";
 import { useLocation, useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
