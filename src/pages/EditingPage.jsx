@@ -1,3 +1,5 @@
+// Enhanced FileEditorPage.js with better socket handling for notifications
+
 import React, { useState, useEffect } from "react";
 import { useLocation, useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
@@ -22,7 +24,9 @@ import {
   Clock,
   FileText,
   AlertTriangle,
-  User
+  User,
+  Wifi,
+  WifiOff
 } from "lucide-react";
 
 const FileEditorPage = () => {
@@ -43,39 +47,100 @@ const FileEditorPage = () => {
   const [isSharedView, setIsSharedView] = useState(false);
   const [shareLink, setShareLink] = useState("");
   
-  // 🔔 Enhanced notification states for change approval
+  // Enhanced notification states for change approval
   const [notifications, setNotifications] = useState([]);
   const [notifOpen, setNotifOpen] = useState(false);
   const [processingChange, setProcessingChange] = useState(null);
   const [socket, setSocket] = useState(null);
-  const [pendingChanges, setPendingChanges] = useState(new Map());
+  const [socketConnected, setSocketConnected] = useState(false);
   const [isCollaborator, setIsCollaborator] = useState(false);
   
-  // User info - you'll need to implement this based on your auth system
+  // User info - determine role based on URL
   const [currentUser, setCurrentUser] = useState({ 
     id: 'user123', 
     name: 'Current User',
-    role: 'collaborator' // 'owner' or 'collaborator'
+    role: params.sharedId ? 'collaborator' : 'owner' // Auto-detect role
   });
 
   const API_BASE = "https://livesh.onrender.com/api/files";
 
-  // Enhanced socket connection for change approval workflow
+  // Enhanced socket connection with better error handling and reconnection
   useEffect(() => {
-    const socketConnection = io("http://localhost:5000");
+    console.log('🔌 Setting up socket connection...');
+    
+    const socketConnection = io("https://livesh.onrender.com", {
+      transports: ['websocket', 'polling'],
+      timeout: 20000,
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionAttempts: 5,
+      maxReconnectionAttempts: 5,
+      forceNew: true
+    });
+    
     setSocket(socketConnection);
 
-    // Listen for pending changes (when collaborator makes changes)
-    socketConnection.on("change-pending", (data) => {
-      console.log("Received change-pending:", data);
+    // Connection status handlers
+    socketConnection.on('connect', () => {
+      console.log('✅ Socket connected successfully:', socketConnection.id);
+      setSocketConnected(true);
       
-      // Only show notifications to the project owner
+      // Identify user to server
+      socketConnection.emit('identify', {
+        userId: currentUser.id,
+        userName: currentUser.name,
+        role: currentUser.role,
+        shareId: params.sharedId
+      });
+      
+      // Join appropriate rooms
       if (currentUser.role === 'owner') {
-        setNotifications((prev) => [
-          {
+        socketConnection.emit('join-room', { role: 'owner' });
+      }
+      
+      if (params.sharedId) {
+        socketConnection.emit('join-room', { shareId: params.sharedId, role: currentUser.role });
+      }
+    });
+
+    socketConnection.on('disconnect', (reason) => {
+      console.log('❌ Socket disconnected:', reason);
+      setSocketConnected(false);
+    });
+
+    socketConnection.on('connect_error', (error) => {
+      console.error('🚨 Socket connection error:', error);
+      setSocketConnected(false);
+    });
+
+    socketConnection.on('reconnect', (attemptNumber) => {
+      console.log('🔄 Socket reconnected after', attemptNumber, 'attempts');
+      setSocketConnected(true);
+    });
+
+    socketConnection.on('reconnect_error', (error) => {
+      console.error('🔄❌ Socket reconnection failed:', error);
+    });
+
+    // Enhanced change request listeners
+    socketConnection.on("change-pending", (data) => {
+      console.log("📬 Received change-pending notification:", data);
+      
+      // Show notifications to OWNER only
+      if (currentUser.role === 'owner') {
+        console.log('👨‍💼 Adding notification for owner');
+        setNotifications((prev) => {
+          // Check if notification already exists to prevent duplicates
+          const existingNotif = prev.find(n => n.changeId === data.id);
+          if (existingNotif) {
+            console.log('⚠️ Notification already exists, skipping duplicate');
+            return prev;
+          }
+          
+          const newNotification = {
             id: Date.now(),
             type: 'change-pending',
-            message: `${data.collaboratorName} wants to save changes to ${data.fileName}`,
+            message: data.message || `${data.collaboratorName} wants to save changes to ${data.fileName}`,
             collaboratorName: data.collaboratorName,
             fileName: data.fileName,
             fileId: data.fileId,
@@ -83,30 +148,69 @@ const FileEditorPage = () => {
             changes: data.changes,
             timestamp: new Date().toISOString(),
             shareId: data.shareId
-          },
-          ...prev,
-        ]);
+          };
+          
+          console.log('➕ Adding new notification:', newNotification);
+          return [newNotification, ...prev];
+        });
 
         // Show browser notification if page is not focused
         if (!document.hasFocus() && Notification.permission === 'granted') {
           new Notification(`Change Request from ${data.collaboratorName}`, {
             body: `Wants to save changes to ${data.fileName}`,
-            icon: '/favicon.ico'
+            icon: '/favicon.ico',
+            badge: '/favicon.ico',
+            tag: `change-${data.id}` // Prevent duplicate notifications
           });
         }
+        
+        // Play notification sound (optional)
+        try {
+          const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmYdBSuR2O3AcCEE');
+          audio.volume = 0.3;
+          audio.play().catch(() => {}); // Ignore if autoplay is blocked
+        } catch (e) {
+          // Ignore audio errors
+        }
+      } else {
+        console.log('🤝 User is collaborator, not showing owner notification');
+      }
+    });
+
+    // Listen for owner-specific notifications
+    socketConnection.on("owner-change-request", (data) => {
+      console.log("👨‍💼 Received owner-specific change request:", data);
+      if (currentUser.role === 'owner') {
+        // Handle owner-specific notifications
+        setNotifications((prev) => [
+          {
+            id: Date.now(),
+            type: 'change-pending',
+            message: `🔔 ${data.collaboratorName} requests approval`,
+            collaboratorName: data.collaboratorName,
+            fileName: data.fileName,
+            fileId: data.fileId,
+            changeId: data.id,
+            changes: data.changes,
+            timestamp: new Date().toISOString(),
+            shareId: data.shareId,
+            priority: 'high'
+          },
+          ...prev,
+        ]);
       }
     });
 
     // Listen for change approval/rejection responses
     socketConnection.on("change-approved", (data) => {
-      console.log("Change approved and applied:", data);
+      console.log("✅ Change approved and applied:", data);
       
       // Update file content if it's the currently selected file
       if (selectedFile === data.fileId) {
         setFileContent(data.newContent);
       }
       
-      // Remove the notification from the list
+      // Remove the notification from the list (for owner)
       setNotifications((prev) => prev.filter((n) => n.changeId !== data.changeId));
       
       // Show success message to collaborator
@@ -115,24 +219,29 @@ const FileEditorPage = () => {
           {
             id: Date.now(),
             type: 'approval-success',
-            message: `Your changes to ${data.fileName} have been approved!`,
+            message: `✅ Your changes to ${data.fileName} have been approved!`,
             timestamp: new Date().toISOString(),
             isSuccess: true
           },
           ...prev,
         ]);
       }
+
+      // Update files list
+      setFiles(prev => prev.map(f => 
+        (f._id || f.id) === data.fileId ? { ...f, content: data.newContent } : f
+      ));
     });
 
     socketConnection.on("change-rejected", (data) => {
-      console.log("Change was rejected:", data);
+      console.log("❌ Change was rejected:", data);
       
       // Revert file content if it's the currently selected file
       if (selectedFile === data.fileId) {
         setFileContent(data.originalContent);
       }
       
-      // Remove the notification from the list
+      // Remove the notification from the list (for owner)
       setNotifications((prev) => prev.filter((n) => n.changeId !== data.changeId));
       
       // Show rejection message to collaborator
@@ -141,7 +250,7 @@ const FileEditorPage = () => {
           {
             id: Date.now(),
             type: 'rejection-info',
-            message: `Your changes to ${data.fileName} were declined`,
+            message: `❌ Your changes to ${data.fileName} were declined`,
             timestamp: new Date().toISOString(),
             isInfo: true
           },
@@ -153,7 +262,7 @@ const FileEditorPage = () => {
     // Listen for real-time file updates
     socketConnection.on("file-changed", (data) => {
       if (data.type === "update") {
-        console.log("File updated:", data);
+        console.log("📝 File updated:", data);
         
         // Update files list
         setFiles(prev => prev.map(f => 
@@ -165,7 +274,7 @@ const FileEditorPage = () => {
           {
             id: Date.now(),
             type: 'file-updated',
-            message: `File "${data.file.name}" has been updated`,
+            message: `📝 File "${data.file.name}" has been updated`,
             timestamp: new Date().toISOString(),
             isSuccess: true
           },
@@ -174,16 +283,56 @@ const FileEditorPage = () => {
       }
     });
 
-    // Listen for collaboration status
-    socketConnection.on("collaboration-status", (data) => {
-      setIsCollaborator(data.isCollaborator);
-      if (data.pendingChanges) {
-        setPendingChanges(new Map(data.pendingChanges));
-      }
+    // Debug listeners
+    socketConnection.on("debug-notification", (data) => {
+      console.log("🐛 Debug notification received:", data);
     });
 
-    return () => socketConnection.disconnect();
-  }, [selectedFile, currentUser]);
+    socketConnection.on("server-ping", (data) => {
+      console.log("🏓 Server ping received:", data);
+    });
+
+    // Test connection
+    socketConnection.on("pong-test", (data) => {
+      console.log("🏓 Pong received:", data);
+    });
+
+    // Send a test ping every 30 seconds to keep connection alive
+    const pingInterval = setInterval(() => {
+      if (socketConnection.connected) {
+        socketConnection.emit('ping-test', { 
+          message: 'Client ping', 
+          timestamp: new Date(),
+          userRole: currentUser.role 
+        });
+      }
+    }, 30000);
+
+    return () => {
+      console.log('🧹 Cleaning up socket connection');
+      clearInterval(pingInterval);
+      
+      if (socketConnection) {
+        // Leave rooms before disconnecting
+        if (currentUser.role === 'owner') {
+          socketConnection.emit('leave-room', { role: 'owner' });
+        }
+        if (params.sharedId) {
+          socketConnection.emit('leave-room', { shareId: params.sharedId });
+        }
+        
+        socketConnection.disconnect();
+      }
+    };
+  }, [selectedFile, currentUser.role, params.sharedId]);
+
+  // Update user role when URL changes
+  useEffect(() => {
+    const newRole = params.sharedId ? 'collaborator' : 'owner';
+    setCurrentUser(prev => ({ ...prev, role: newRole }));
+    setIsSharedView(!!params.sharedId);
+    console.log('👤 User role updated to:', newRole);
+  }, [params.sharedId]);
 
   // Request notification permission on component mount
   useEffect(() => {
@@ -240,7 +389,16 @@ const FileEditorPage = () => {
     } catch (err) {
       console.error("Failed to load files:", err);
       setFiles([]);
-      alert("Failed to load files. Please check your backend connection.");
+      setNotifications((prev) => [
+        {
+          id: Date.now(),
+          type: 'error',
+          message: '❌ Failed to load files. Please check your connection.',
+          timestamp: new Date().toISOString(),
+          isError: true
+        },
+        ...prev,
+      ]);
     } finally {
       setLoading(false);
     }
@@ -261,7 +419,16 @@ const FileEditorPage = () => {
       }
     } catch (err) {
       console.error('Failed to load shared files:', err);
-      alert(err.response?.data?.message || err.message || 'Failed to load shared files');
+      setNotifications((prev) => [
+        {
+          id: Date.now(),
+          type: 'error',
+          message: err.response?.data?.message || '❌ Failed to load shared files',
+          timestamp: new Date().toISOString(),
+          isError: true
+        },
+        ...prev,
+      ]);
     } finally {
       setLoading(false);
     }
@@ -274,7 +441,6 @@ const FileEditorPage = () => {
     
     if (sharedId) {
       loadSharedFiles(sharedId);
-      setCurrentUser(prev => ({ ...prev, role: 'collaborator' }));
     } else {
       loadFiles(currentFolderId);
     }
@@ -327,17 +493,25 @@ const FileEditorPage = () => {
     setLanguage(langMap[ext] || "plaintext");
   };
 
-  // Enhanced save function for change approval workflow
+  // Enhanced save function that uses the dedicated endpoint
   const handleSave = async () => {
     if (!selectedFile) return;
 
     const selectedFileObj = files.find(f => (f._id || f.id) === selectedFile);
     if (!selectedFileObj) return;
 
-    // If user is a collaborator in shared view, request approval
+    // If user is a collaborator in shared view, use the dedicated request-change endpoint
     if (isSharedView && currentUser.role === 'collaborator') {
       try {
         setSaving(true);
+        
+        console.log('📤 Sending change request...', {
+          fileId: selectedFile,
+          newContent: fileContent,
+          collaboratorName: currentUser.name,
+          fileName: selectedFileObj.name,
+          shareId: params.sharedId
+        });
         
         const response = await axios.post(`${API_BASE}/request-change`, {
           fileId: selectedFile,
@@ -347,36 +521,31 @@ const FileEditorPage = () => {
           shareId: params.sharedId
         });
 
-        console.log('Change request sent:', response.data);
+        console.log('✅ Change request sent successfully:', response.data);
         
         setNotifications((prev) => [
           {
             id: Date.now(),
             type: 'change-requested',
-            message: `Change request sent for ${selectedFileObj.name}. Waiting for approval...`,
+            message: `📤 Change request sent for ${selectedFileObj.name}. Waiting for approval...`,
             timestamp: new Date().toISOString(),
             isInfo: true
           },
           ...prev,
         ]);
 
-        // Emit socket event for real-time notification
-        if (socket) {
-          socket.emit('change-requested', {
-            fileId: selectedFile,
-            fileName: selectedFileObj.name,
-            collaboratorName: currentUser.name,
-            changes: {
-              from: selectedFileObj.content,
-              to: fileContent
-            },
-            shareId: params.sharedId
-          });
-        }
-
       } catch (err) {
-        console.error('Failed to request change:', err);
-        alert(err.response?.data?.message || err.message || 'Failed to request change');
+        console.error('❌ Failed to request change:', err);
+        setNotifications((prev) => [
+          {
+            id: Date.now(),
+            type: 'error',
+            message: err.response?.data?.message || '❌ Failed to request change',
+            timestamp: new Date().toISOString(),
+            isError: true
+          },
+          ...prev,
+        ]);
       } finally {
         setSaving(false);
       }
@@ -391,560 +560,412 @@ const FileEditorPage = () => {
           {
             id: Date.now(),
             type: 'save-success',
-            message: `File ${selectedFileObj.name} saved successfully!`,
+            message: `✅ File ${selectedFileObj.name} saved successfully!`,
             timestamp: new Date().toISOString(),
             isSuccess: true
           },
           ...prev,
         ]);
       } catch (err) {
-        console.error('Failed to save file:', err);
-        alert(err.response?.data?.message || err.message || 'Failed to save file');
+        console.error('❌ Failed to save file:', err);
+        setNotifications((prev) => [
+          {
+            id: Date.now(),
+            type: 'error',
+            message: err.response?.data?.message || '❌ Failed to save file',
+            timestamp: new Date().toISOString(),
+            isError: true
+          },
+          ...prev,
+        ]);
       } finally {
         setSaving(false);
       }
     }
   };
 
-  // Handle change approval
-  const handleAccept = async (notificationId, changeId) => {
-    if (!changeId) {
-      console.error("No changeId provided for approval");
-      return;
-    }
-
+  // Handle change approval (for owners)
+  const handleApproveChange = async (changeId) => {
     try {
       setProcessingChange(changeId);
+      console.log('✅ Approving change:', changeId);
       
-      const response = await axios.post(
-        `${API_BASE}/approve-change/${changeId}`
-      );
+      const response = await axios.post(`${API_BASE}/approve-change/${changeId}`);
+      console.log('Change approved:', response.data);
       
-      console.log("Change approved:", response.data);
+      // Remove the notification
+      setNotifications(prev => prev.filter(n => n.changeId !== changeId));
       
       // Show success message
       setNotifications((prev) => [
         {
           id: Date.now(),
           type: 'approval-success',
-          message: `Changes approved and applied successfully!`,
+          message: '✅ Change approved successfully!',
           timestamp: new Date().toISOString(),
           isSuccess: true
         },
-        ...prev.filter((n) => n.id !== notificationId)
+        ...prev,
       ]);
       
-      // Refresh files to get updated content
-      if (params.sharedId) {
-        loadSharedFiles(params.sharedId);
-      } else {
-        loadFiles(currentFolderId);
-      }
-      
-    } catch (error) {
-      console.error("Failed to approve change:", error);
-      alert('Failed to approve changes: ' + (error.response?.data?.message || error.message));
+    } catch (err) {
+      console.error('❌ Failed to approve change:', err);
+      setNotifications((prev) => [
+        {
+          id: Date.now(),
+          type: 'error',
+          message: '❌ Failed to approve change',
+          timestamp: new Date().toISOString(),
+          isError: true
+        },
+        ...prev,
+      ]);
     } finally {
       setProcessingChange(null);
     }
   };
 
-  const handleDecline = async (notificationId, changeId) => {
-    if (!changeId) {
-      console.error("No changeId provided for rejection");
-      return;
-    }
-
+  // Handle change rejection (for owners)
+  const handleRejectChange = async (changeId) => {
     try {
       setProcessingChange(changeId);
+      console.log('❌ Rejecting change:', changeId);
       
-      const response = await axios.post(
-        `${API_BASE}/reject-change/${changeId}`
-      );
+      const response = await axios.post(`${API_BASE}/reject-change/${changeId}`);
+      console.log('Change rejected:', response.data);
       
-      console.log("Change rejected:", response.data);
+      // Remove the notification
+      setNotifications(prev => prev.filter(n => n.changeId !== changeId));
       
+      // Show info message
       setNotifications((prev) => [
         {
           id: Date.now(),
           type: 'rejection-info',
-          message: `Changes rejected and reverted`,
+          message: '❌ Change rejected',
           timestamp: new Date().toISOString(),
           isInfo: true
         },
-        ...prev.filter((n) => n.id !== notificationId)
+        ...prev,
       ]);
       
-    } catch (error) {
-      console.error("Failed to reject change:", error);
-      alert('Failed to reject changes: ' + (error.response?.data?.message || error.message));
+    } catch (err) {
+      console.error('❌ Failed to reject change:', err);
+      setNotifications((prev) => [
+        {
+          id: Date.now(),
+          type: 'error',
+          message: '❌ Failed to reject change',
+          timestamp: new Date().toISOString(),
+          isError: true
+        },
+        ...prev,
+      ]);
     } finally {
       setProcessingChange(null);
     }
   };
 
-  const handleShare = async () => {
-    if (isSharedView) {
-      alert('Cannot create share links in shared view');
-      return;
-    }
-
+  // Create share link
+  const handleCreateShareLink = async () => {
     try {
       setSharing(true);
-      let shareId;
-      
-      if (currentFolderId) {
-        shareId = currentFolderId;
-      } else {
-        shareId = 'root';
-      }
-      
-      console.log('Creating share link for:', shareId);
-      
       const response = await axios.post(`${API_BASE}/share`, {
-        folderId: shareId,
-        type: 'folder'
+        folderId: currentFolderId || "root",
+        type: "folder"
       });
       
-      console.log('Share response:', response.data);
-      
-      if (response.data && response.data.shareLink) {
-        const fullShareLink = `${window.location.origin}/editing/shared/${response.data.shareId}`;
-        setShareLink(fullShareLink);
-        
-        await navigator.clipboard.writeText(fullShareLink);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 3000);
-        
-        alert('Share link created and copied to clipboard!');
-      } else {
-        throw new Error('Invalid response from server');
-      }
+      setShareLink(response.data.shareLink);
+      setNotifications((prev) => [
+        {
+          id: Date.now(),
+          type: 'share-success',
+          message: '🔗 Share link created successfully!',
+          timestamp: new Date().toISOString(),
+          isSuccess: true
+        },
+        ...prev,
+      ]);
       
     } catch (err) {
-      console.error('Failed to create share link:', err);
-      
-      if (err.response?.status === 404) {
-        alert('Folder not found. Please refresh and try again.');
-      } else if (err.response?.status === 401) {
-        alert('Unauthorized. Please log in again.');
-      } else if (err.response?.status === 500) {
-        alert('Server error. Please try again later.');
-      } else if (err.name === 'NetworkError' || err.code === 'NETWORK_ERROR') {
-        alert('Network error. Please check your connection.');
-      } else {
-        alert(err.response?.data?.message || err.message || 'Failed to create share link');
-      }
+      console.error('❌ Failed to create share link:', err);
+      setNotifications((prev) => [
+        {
+          id: Date.now(),
+          type: 'error',
+          message: '❌ Failed to create share link',
+          timestamp: new Date().toISOString(),
+          isError: true
+        },
+        ...prev,
+      ]);
     } finally {
       setSharing(false);
     }
   };
 
+  // Copy share link to clipboard
   const handleCopyShareLink = async () => {
-    if (shareLink) {
-      try {
-        await navigator.clipboard.writeText(shareLink);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      } catch (err) {
-        console.error('Failed to copy link:', err);
-        const textArea = document.createElement('textarea');
-        textArea.value = shareLink;
-        document.body.appendChild(textArea);
-        textArea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textArea);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      }
-    }
-  };
-
-  const handleFileUpload = async (event) => {
-    const uploadFiles = Array.from(event.target.files);
-    if (!uploadFiles.length) return;
-
     try {
-      setLoading(true);
-      const formData = new FormData();
-      uploadFiles.forEach(file => formData.append("files", file));
-      if (currentFolderId) formData.append('parentId', currentFolderId);
-
-      console.log('Uploading files via editor...');
-      await axios.post(`${API_BASE}/upload-folder`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-
-      await loadFiles(currentFolderId);
-      alert("Files uploaded successfully!");
+      await navigator.clipboard.writeText(shareLink);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+      
+      setNotifications((prev) => [
+        {
+          id: Date.now(),
+          type: 'copy-success',
+          message: '📋 Share link copied to clipboard!',
+          timestamp: new Date().toISOString(),
+          isSuccess: true
+        },
+        ...prev,
+      ]);
     } catch (err) {
-      console.error("Upload failed:", err);
-      alert(err.response?.data?.message || err.message || "Failed to upload files");
-    } finally {
-      setLoading(false);
+      console.error('❌ Failed to copy:', err);
     }
   };
 
-  const handleRefresh = () => {
-    console.log('Manual refresh triggered');
-    if (params.sharedId) {
-      loadSharedFiles(params.sharedId);
-    } else {
-      loadFiles(currentFolderId);
-    }
-  };
-
-  const handleDownload = () => {
-    const selectedFileObj = files.find(f => (f._id || f.id) === selectedFile);
-    if (!selectedFileObj) {
-      alert('Please select a file to download');
-      return;
-    }
-    
-    try {
-      const element = document.createElement("a");
-      const file = new Blob([fileContent], { type: "text/plain" });
-      element.href = URL.createObjectURL(file);
-      element.download = selectedFileObj.name;
-      document.body.appendChild(element);
-      element.click();
-      document.body.removeChild(element);
-    } catch (err) {
-      console.error('Download failed:', err);
-      alert('Failed to download file');
-    }
-  };
-
-  const clearAllNotifications = () => {
-    setNotifications([]);
-  };
-
-  const getNotificationIcon = (notification) => {
-    switch (notification.type) {
-      case 'change-pending':
-        return <Clock className="w-4 h-4 text-orange-400 flex-shrink-0" />;
-      case 'change-requested':
-        return <Clock className="w-4 h-4 text-blue-400 flex-shrink-0" />;
-      case 'file-updated':
-        return <FileText className="w-4 h-4 text-blue-400 flex-shrink-0" />;
-      case 'approval-success':
-      case 'save-success':
-        return <CheckCircle className="w-4 h-4 text-green-400 flex-shrink-0" />;
-      case 'rejection-info':
-        return <XCircle className="w-4 h-4 text-gray-400 flex-shrink-0" />;
-      default:
-        return <Bell className="w-4 h-4 text-blue-400 flex-shrink-0" />;
+  const handleFileSelect = (fileId) => {
+    const file = files.find(f => (f._id || f.id) === fileId);
+    if (file && !file.isFolder) {
+      setSelectedFile(fileId);
     }
   };
 
   const formatTimestamp = (timestamp) => {
-    const now = new Date();
-    const time = new Date(timestamp);
-    const diff = now - time;
-    
-    if (diff < 60000) return 'Just now';
-    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
-    return time.toLocaleDateString();
+    return new Date(timestamp).toLocaleTimeString();
   };
 
-  const getFileIcon = (filename) => {
-    const ext = filename.split(".").pop().toLowerCase();
-    const iconMap = {
-      js: "🟨", jsx: "⚛️", ts: "🔷", tsx: "⚛️", html: "🌐",
-      css: "🎨", json: "📋", md: "📝", py: "🐍", java: "☕",
-      cpp: "⚙️", c: "⚙️", cs: "🔷", php: "🐘", go: "🐹",
-      rs: "🦀", rb: "💎", vue: "💚", svelte: "🧡", exe: "⚙️",
-    };
-    return iconMap[ext] || "📄";
-  };
+  // Count pending change notifications
+  const pendingChangeCount = notifications.filter(n => n.type === 'change-pending').length;
 
-  const selectedFileObj = files.find(f => (f._id || f.id) === selectedFile);
+  // Test socket connection
+  const testSocketConnection = () => {
+    if (socket && socket.connected) {
+      socket.emit('ping-test', { 
+        message: 'Manual test ping', 
+        timestamp: new Date(),
+        userRole: currentUser.role 
+      });
+      console.log('🏓 Test ping sent');
+    } else {
+      console.log('❌ Socket not connected');
+    }
+  };
 
   return (
-    <div className="flex h-screen bg-gray-900 text-white">
-      {/* Mobile Sidebar Overlay */}
-      {sidebarOpen && <div className="lg:hidden fixed inset-0 bg-black bg-opacity-50 z-40" onClick={() => setSidebarOpen(false)} />}
-
+    <div className="min-h-screen bg-gray-900 text-white flex">
       {/* Sidebar */}
-      <div className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 fixed lg:relative z-50 w-80 bg-gray-800 border-r border-gray-700 transition-transform duration-300 ease-in-out flex flex-col h-full`}>
-        {/* Sidebar Header */}
-        <div className="p-4 border-b border-gray-700 flex items-center justify-between flex-shrink-0">
-          <div className="flex items-center gap-2">
-            <Folder className="w-5 h-5 text-blue-400" />
-            <h2 className="font-semibold text-lg">{isSharedView ? 'Shared Files' : 'Explorer'}</h2>
-            {isSharedView && currentUser.role === 'collaborator' && (
-              <span className="text-xs bg-yellow-600 px-2 py-1 rounded">Collaborator</span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <button 
-              onClick={handleRefresh} 
-              className="p-2 hover:bg-gray-700 rounded-md transition-colors" 
-              title="Refresh files"
-              disabled={loading}
+      <div className={`${sidebarOpen ? 'w-64' : 'w-12'} transition-all duration-200 bg-gray-800 border-r border-gray-700 flex flex-col`}>
+        <div className="p-3 border-b border-gray-700">
+          <div className="flex items-center justify-between">
+            <h2 className={`font-semibold ${!sidebarOpen && 'hidden'}`}>
+              {isSharedView ? 'Shared Files' : 'Files'}
+            </h2>
+            <button
+              onClick={() => setSidebarOpen(!sidebarOpen)}
+              className="p-1 hover:bg-gray-700 rounded"
             >
-              <RefreshCw className={`w-4 h-4 text-blue-400 ${loading ? 'animate-spin' : ''}`} />
-            </button>
-            {!isSharedView && (
-              <label className="p-2 hover:bg-gray-700 rounded-md transition-colors cursor-pointer" title="Upload files">
-                <Upload className="w-4 h-4 text-blue-400" />
-                <input type="file" multiple onChange={handleFileUpload} className="hidden" webkitdirectory="" />
-              </label>
-            )}
-            <div className="relative share-dropdown">
-              <button 
-                onClick={() => setShareMenuOpen(!shareMenuOpen)} 
-                className={`p-2 hover:bg-gray-700 rounded-md transition-colors group relative ${sharing ? 'animate-pulse' : ''}`} 
-                title="Share project"
-                disabled={sharing}
-              >
-                <Share2 className={`w-4 h-4 ${sharing ? 'text-yellow-400' : 'text-blue-400'} group-hover:text-green-400`} />
-              </button>
-              {shareMenuOpen && (
-                <div className="absolute top-full left-0 mt-1 w-64 bg-gray-800 border border-gray-600 rounded-md shadow-lg z-50">
-                  <div className="py-1">
-                    {!isSharedView && (
-                      <button 
-                        onClick={() => { 
-                          handleShare(); 
-                          setShareMenuOpen(false); 
-                        }} 
-                        disabled={sharing}
-                        className={`flex items-center gap-2 w-full px-3 py-2 text-sm hover:bg-gray-600 transition-colors ${sharing ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      >
-                        <Link className="w-4 h-4" /> 
-                        {sharing ? 'Creating Link...' : 'Create Share Link'}
-                      </button>
-                    )}
-                    {shareLink && (
-                      <div className="px-3 py-2 border-t border-gray-600">
-                        <div className="text-xs text-gray-400 mb-1">Share Link:</div>
-                        <div className="flex items-center gap-2">
-                          <input 
-                            type="text" 
-                            value={shareLink} 
-                            readOnly 
-                            className="flex-1 bg-gray-700 text-xs p-1 rounded border-none outline-none"
-                          />
-                          <button 
-                            onClick={handleCopyShareLink}
-                            className="p-1 hover:bg-gray-600 rounded"
-                            title="Copy link"
-                          >
-                            <Copy className="w-3 h-3" />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                    <button 
-                      onClick={() => { 
-                        handleDownload(); 
-                        setShareMenuOpen(false); 
-                      }} 
-                      className="flex items-center gap-2 w-full px-3 py-2 text-sm hover:bg-gray-600 transition-colors" 
-                      disabled={!selectedFile}
-                    >
-                      <Download className="w-4 h-4" /> Download File
-                    </button>
-                    {copied && (
-                      <div className="px-3 py-2 text-xs text-green-400 border-t border-gray-600">
-                         Link copied to clipboard!
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-            <button onClick={() => setSidebarOpen(false)} className="lg:hidden p-2 hover:bg-gray-700 rounded-md transition-colors">
-              <X className="w-4 h-4" />
+              <Menu size={16} />
             </button>
           </div>
         </div>
-
-        {/* File List */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden p-2 min-h-0">
+        
+        <div className="flex-1 overflow-auto">
           {loading ? (
-            <div className="flex items-center justify-center h-32 text-gray-400">
-              <div className="text-center">
-                <RefreshCw className="w-8 h-8 animate-spin mb-2 mx-auto" />
-                <p>Loading files...</p>
-              </div>
+            <div className="p-4 text-center">
+              <RefreshCw className="animate-spin mx-auto mb-2" size={20} />
+              <p className="text-sm text-gray-400">Loading files...</p>
             </div>
-          ) : files.length > 0 ? (
-            <div className="space-y-1 pb-4">
-              {files.map((file, index) => {
-                const fileId = file._id || file.id;
-                const isSelected = selectedFile === fileId;
-                const uniqueKey = generateFileKey(file, index);
-                const hasPendingChanges = pendingChanges.has(fileId);
-
-                return (
-                  <div 
-                    key={uniqueKey} 
-                    className={`flex items-center gap-2 p-2 rounded-md cursor-pointer transition-all hover:bg-gray-700 ${
-                      isSelected ? "bg-blue-600/20 border border-blue-500/50" : ""
-                    }`} 
-                    onClick={() => {
-                      if (file.isFolder) {
-                        setCurrentFolderId(fileId);
-                        setSelectedFile(null);
-                        loadFiles(fileId);
-                      } else {
-                        setSelectedFile(fileId);
-                      }
-                    }}
-                  >
-                    <span className="text-lg flex-shrink-0">{file.isFolder ? "📁" : getFileIcon(file.name)}</span>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium truncate flex items-center gap-2">
-                        {file.name}
-                        {hasPendingChanges && (
-                          <Clock className="w-3 h-3 text-orange-400" title="Has pending changes" />
-                        )}
-                      </div>
-                      <div className="text-xs text-gray-400">{file.isFolder ? "Folder" : "File"}</div>
-                    </div>
-                    {isSelected && !file.isFolder && <div className="w-2 h-2 bg-blue-400 rounded-full flex-shrink-0" />}
-                  </div>
-                );
-              })}
+          ) : files.length === 0 ? (
+            <div className="p-4 text-center">
+              <FileText className="mx-auto mb-2 text-gray-400" size={20} />
+              <p className="text-sm text-gray-400">No files found</p>
             </div>
           ) : (
-            <div className="flex flex-col items-center justify-center h-32 text-gray-500">
-              <File className="w-8 h-8 mb-2" />
-              <p className="text-sm text-center">No files found</p>
-              <p className="text-xs mt-1 text-center">Upload files or check backend connection</p>
-              <button 
-                onClick={handleRefresh}
-                className="mt-2 px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-xs transition-colors"
+            files.map((file, index) => (
+              <div
+                key={generateFileKey(file, index)}
+                onClick={() => handleFileSelect(file._id || file.id)}
+                className={`p-2 mx-2 my-1 rounded cursor-pointer flex items-center gap-2 hover:bg-gray-700 ${
+                  selectedFile === (file._id || file.id) ? 'bg-blue-600' : ''
+                }`}
               >
-                Retry
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Main Editor */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Top Toolbar */}
-        <div className="bg-gray-800 border-b border-gray-700 p-3 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <button onClick={() => setSidebarOpen(true)} className="lg:hidden p-2 hover:bg-gray-700 rounded-md transition-colors">
-              <Menu className="w-5 h-5" />
-            </button>
-            {selectedFileObj ? (
-              <div className="flex items-center gap-2">
-                <span className="text-lg">{getFileIcon(selectedFileObj.name)}</span>
-                <span className="font-medium text-sm">{selectedFileObj.name}</span>
-                <span className="text-xs bg-gray-700 px-2 py-1 rounded uppercase">{language}</span>
-                {isSharedView && currentUser.role === 'collaborator' && (
-                  <span className="text-xs bg-yellow-600 px-2 py-1 rounded">Read Only</span>
-                )}
-                {pendingChanges.has(selectedFile) && (
-                  <span className="text-xs bg-orange-600 px-2 py-1 rounded flex items-center gap-1">
-                    <Clock className="w-3 h-3" />
-                    Pending
-                  </span>
+                {file.isFolder ? <Folder size={16} /> : <File size={16} />}
+                {sidebarOpen && (
+                  <span className="truncate text-sm">{file.name}</span>
                 )}
               </div>
-            ) : (
-              <div className="text-sm text-gray-400">No file selected</div>
+            ))
+          )}
+        </div>
+        
+        {/* Socket Connection Status (Debug Info) */}
+        {sidebarOpen && (
+          <div className="p-2 border-t border-gray-700 text-xs">
+            <div className="flex items-center gap-2 mb-1">
+              {socketConnected ? (
+                <>
+                  <Wifi size={12} className="text-green-400" />
+                  <span className="text-green-400">Connected</span>
+                </>
+              ) : (
+                <>
+                  <WifiOff size={12} className="text-red-400" />
+                  <span className="text-red-400">Disconnected</span>
+                </>
+              )}
+            </div>
+            <button
+              onClick={testSocketConnection}
+              className="text-xs text-blue-400 hover:text-blue-300"
+            >
+              Test Connection
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col">
+        {/* Header */}
+        <header className="bg-gray-800 border-b border-gray-700 p-4 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <h1 className="text-xl font-semibold">File Editor</h1>
+            {isSharedView && (
+              <span className="px-2 py-1 bg-blue-600 text-xs rounded">
+                {currentUser.role === 'collaborator' ? '🤝 Collaborator' : '👨‍💼 Owner'} View
+              </span>
+            )}
+            {selectedFile && (
+              <span className="text-gray-400">
+                {files.find(f => (f._id || f.id) === selectedFile)?.name}
+              </span>
             )}
           </div>
-
+          
           <div className="flex items-center gap-2">
-            {/* Enhanced Bell Notification Icon */}
+            {/* Socket Status Indicator */}
+            <div className="flex items-center gap-1 px-2 py-1 rounded text-xs">
+              {socketConnected ? (
+                <>
+                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                  <span className="text-green-400">Live</span>
+                </>
+              ) : (
+                <>
+                  <div className="w-2 h-2 bg-red-400 rounded-full"></div>
+                  <span className="text-red-400">Offline</span>
+                </>
+              )}
+            </div>
+
+            {/* Notifications */}
             <div className="relative notification-dropdown">
-              <button 
-                onClick={() => setNotifOpen(!notifOpen)} 
-                className="relative p-2 hover:bg-gray-700 rounded-md transition-colors"
+              <button
+                onClick={() => setNotifOpen(!notifOpen)}
+                className={`p-2 rounded hover:bg-gray-700 relative ${
+                  pendingChangeCount > 0 ? 'text-orange-400' : ''
+                }`}
               >
-                <Bell className="w-5 h-5 text-blue-400 hover:text-secondary cursor-pointer transition" />
-                {notifications.length > 0 && (
-                  <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs px-1.5 py-0.5 rounded-full min-w-[1.25rem] h-5 flex items-center justify-center">
-                    {notifications.length > 9 ? '9+' : notifications.length}
+                <Bell size={18} />
+                {pendingChangeCount > 0 && (
+                  <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center animate-bounce">
+                    {pendingChangeCount}
                   </span>
                 )}
                 {notifications.some(n => n.type === 'change-pending') && (
-                  <span className="absolute -top-0.5 -right-0.5 w-3 h-3 bg-orange-400 rounded-full animate-pulse"></span>
+                  <span className="absolute -top-1 -right-1 w-3 h-3 bg-orange-400 rounded-full animate-pulse"></span>
                 )}
               </button>
-
-              {/* Enhanced Notification dropdown */}
+              
               {notifOpen && (
-                <div className="absolute right-0 mt-2 w-80 bg-gray-800 text-white rounded-lg shadow-xl z-50 max-h-96 overflow-hidden border border-gray-600">
-                  {/* Header */}
+                <div className="absolute right-0 top-full mt-2 w-96 bg-gray-800 border border-gray-700 rounded-lg shadow-lg z-50 max-h-96 overflow-hidden">
                   <div className="p-3 border-b border-gray-700 flex items-center justify-between">
-                    <h3 className="font-semibold text-sm">Notifications</h3>
-                    {notifications.length > 0 && (
-                      <button 
-                        onClick={clearAllNotifications}
-                        className="text-xs text-blue-400 hover:text-blue-300 transition"
-                      >
-                        Clear all
-                      </button>
-                    )}
+                    <h3 className="font-semibold flex items-center gap-2">
+                      <Bell size={16} />
+                      Notifications
+                      {pendingChangeCount > 0 && (
+                        <span className="bg-orange-500 text-white text-xs px-2 py-1 rounded-full">
+                          {pendingChangeCount} pending
+                        </span>
+                      )}
+                    </h3>
+                    <button
+                      onClick={() => setNotifications([])}
+                      className="text-xs text-gray-400 hover:text-white"
+                    >
+                      Clear all
+                    </button>
                   </div>
-
-                  {/* Notifications List */}
-                  <div className="max-h-80 overflow-y-auto">
+                  <div className="max-h-80 overflow-auto">
                     {notifications.length === 0 ? (
                       <div className="p-4 text-center">
-                        <Bell className="w-8 h-8 text-gray-500 mx-auto mb-2" />
+                        <Bell className="mx-auto mb-2 text-gray-500" size={32} />
                         <p className="text-sm text-gray-400">No notifications</p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          Role: {currentUser.role} | Socket: {socketConnected ? 'Connected' : 'Disconnected'}
+                        </p>
                       </div>
                     ) : (
-                      notifications.map((n) => (
-                        <div key={n.id} className="border-b border-gray-700 last:border-b-0">
-                          <div className="p-3">
-                            <div className="flex items-start gap-3">
-                              {getNotificationIcon(n)}
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm text-gray-200 leading-relaxed">
-                                  {n.message}
+                      notifications.map((notif) => (
+                        <div
+                          key={notif.id}
+                          className={`p-3 border-b border-gray-700 last:border-b-0 ${
+                            notif.type === 'change-pending' ? 'bg-orange-900/20 border-l-4 border-l-orange-400' :
+                            notif.isSuccess ? 'bg-green-900/20 border-l-4 border-l-green-400' :
+                            notif.isError ? 'bg-red-900/20 border-l-4 border-l-red-400' :
+                            notif.isInfo ? 'bg-blue-900/20 border-l-4 border-l-blue-400' : ''
+                          }`}
+                        >
+                          <div className="flex items-start gap-2">
+                            {notif.type === 'change-pending' && <AlertTriangle size={16} className="text-orange-400 mt-0.5 animate-pulse" />}
+                            {notif.isSuccess && <CheckCircle size={16} className="text-green-400 mt-0.5" />}
+                            {notif.isError && <XCircle size={16} className="text-red-400 mt-0.5" />}
+                            {notif.isInfo && <Clock size={16} className="text-blue-400 mt-0.5" />}
+                            
+                            <div className="flex-1">
+                              <p className="text-sm font-medium">{notif.message}</p>
+                              {notif.collaboratorName && notif.type === 'change-pending' && (
+                                <p className="text-xs text-gray-400 mt-1 flex items-center gap-1">
+                                  <User size={12} />
+                                  From: {notif.collaboratorName}
                                 </p>
-                                {n.collaboratorName && (
-                                  <p className="text-xs text-gray-400 mt-1">
-                                    From: {n.collaboratorName}
-                                  </p>
-                                )}
-                                <p className="text-xs text-gray-500 mt-1">
-                                  {formatTimestamp(n.timestamp)}
-                                </p>
-
-                                {/* Action buttons for change-pending notifications */}
-                                {n.type === 'change-pending' && (
-                                  <div className="flex gap-2 mt-3">
+                              )}
+                              <p className="text-xs text-gray-500 mt-1">
+                                {formatTimestamp(notif.timestamp)}
+                              </p>
+                              
+                              {notif.type === 'change-pending' && (
+                                <div className="mt-3 space-y-2">
+                                  {notif.changes && (
+                                    <div className="p-2 bg-gray-900 rounded text-xs">
+                                      <div className="text-gray-400 mb-1">Preview:</div>
+                                      <div className="text-red-300 mb-1 line-clamp-2">- {notif.changes.from?.substring(0, 60)}...</div>
+                                      <div className="text-green-300 line-clamp-2">+ {notif.changes.to?.substring(0, 60)}...</div>
+                                    </div>
+                                  )}
+                                  <div className="flex gap-2">
                                     <button
-                                      onClick={() => handleAccept(n.id, n.changeId)}
-                                      disabled={processingChange === n.changeId}
-                                      className="flex items-center gap-1 px-3 py-1 bg-green-600 text-xs rounded hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                                      onClick={() => handleApproveChange(notif.changeId)}
+                                      disabled={processingChange === notif.changeId}
+                                      className="flex-1 px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-xs rounded disabled:opacity-50 flex items-center justify-center gap-1"
                                     >
-                                      <CheckCircle className="w-3 h-3" />
-                                      {processingChange === n.changeId ? 'Approving...' : 'Accept'}
+                                      <CheckCircle size={12} />
+                                      {processingChange === notif.changeId ? 'Approving...' : 'Approve'}
                                     </button>
                                     <button
-                                      onClick={() => handleDecline(n.id, n.changeId)}
-                                      disabled={processingChange === n.changeId}
-                                      className="flex items-center gap-1 px-3 py-1 bg-red-600 text-xs rounded hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                                      onClick={() => handleRejectChange(notif.changeId)}
+                                      disabled={processingChange === notif.changeId}
+                                      className="flex-1 px-3 py-2 bg-red-600 hover:bg-red-700 text-white text-xs rounded disabled:opacity-50 flex items-center justify-center gap-1"
                                     >
-                                      <XCircle className="w-3 h-3" />
-                                      {processingChange === n.changeId ? 'Rejecting...' : 'Decline'}
+                                      <XCircle size={12} />
+                                      {processingChange === notif.changeId ? 'Rejecting...' : 'Reject'}
                                     </button>
                                   </div>
-                                )}
-
-                                {/* Show change preview for pending changes */}
-                                {n.type === 'change-pending' && n.changes && (
-                                  <div className="mt-2 p-2 bg-gray-900 rounded text-xs">
-                                    <div className="text-gray-400 mb-1">Changes:</div>
-                                    <div className="text-red-300 mb-1">- {n.changes.from?.substring(0, 50)}...</div>
-                                    <div className="text-green-300">+ {n.changes.to?.substring(0, 50)}...</div>
-                                  </div>
-                                )}
-                              </div>
+                                </div>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -955,148 +976,108 @@ const FileEditorPage = () => {
               )}
             </div>
 
-            {/* User Icon */}
-            <div className="flex items-center gap-2 px-2">
-              <User className="w-4 h-4 text-blue-400" />
-              <span className="text-xs text-gray-400">{currentUser.name}</span>
-              {currentUser.role === 'collaborator' && (
-                <span className="text-xs bg-yellow-600 px-1 py-0.5 rounded">Collaborator</span>
-              )}
-            </div>
-
-            {/* Save Button - Enhanced for different scenarios */}
-            {selectedFile && (
-              <button 
-                onClick={handleSave} 
-                disabled={saving || (isSharedView && currentUser.role === 'collaborator' && pendingChanges.has(selectedFile))} 
-                className={`flex items-center gap-2 px-4 py-2 rounded-md transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed ${
-                  isSharedView && currentUser.role === 'collaborator'
-                    ? 'bg-orange-600 hover:bg-orange-700' 
-                    : 'bg-blue-600 hover:bg-blue-700'
-                }`}
-                title={
-                  isSharedView && currentUser.role === 'collaborator'
-                    ? 'Request changes (requires owner approval)'
-                    : 'Save file'
-                }
-              >
-                <Save className="w-4 h-4" /> 
-                {saving ? 'Saving...' : 
-                 isSharedView && currentUser.role === 'collaborator' ? 'Request Changes' : 'Save'}
-                {isSharedView && currentUser.role === 'collaborator' && (
-                  <AlertTriangle className="w-4 h-4 text-yellow-200" />
-                )}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Editor Area */}
-        <div className="flex-1">
-          {selectedFileObj && !selectedFileObj.isFolder ? (
-            <div className="relative h-full">
-              <textarea 
-                value={fileContent} 
-                onChange={(e) => setFileContent(e.target.value)} 
-                readOnly={false}
-                className="w-full h-full bg-gray-900 text-white p-4 resize-none outline-none border-none font-mono text-sm leading-relaxed" 
-                style={{ 
-                  fontFamily: "'JetBrains Mono', monospace", 
-                  fontSize: '14px', 
-                  lineHeight: '1.5', 
-                  tabSize: 2 
-                }} 
-                placeholder={
-                  isSharedView && currentUser.role === 'collaborator' 
-                    ? "Edit and click 'Request Changes' to send changes for approval..." 
-                    : "Start typing your code here..."
-                } 
-                spellCheck={false} 
-              />
-              
-              {/* Overlay message for collaborators with pending changes */}
-              {isSharedView && currentUser.role === 'collaborator' && pendingChanges.has(selectedFile) && (
-                <div className="absolute top-4 right-4 bg-orange-600/90 text-white px-3 py-2 rounded-lg shadow-lg">
-                  <div className="flex items-center gap-2 text-sm">
-                    <Clock className="w-4 h-4" />
-                    <span>Changes pending approval</span>
+            {/* Share Menu */}
+            {!isSharedView && (
+              <div className="relative share-dropdown">
+                <button
+                  onClick={() => setShareMenuOpen(!shareMenuOpen)}
+                  className="p-2 rounded hover:bg-gray-700"
+                >
+                  <Share2 size={18} />
+                </button>
+                
+                {shareMenuOpen && (
+                  <div className="absolute right-0 top-full mt-2 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-lg z-50">
+                    <div className="p-4">
+                      <h3 className="font-semibold mb-3">Share Files</h3>
+                      
+                      {!shareLink ? (
+                        <button
+                          onClick={handleCreateShareLink}
+                          disabled={sharing}
+                          className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50"
+                        >
+                          {sharing ? 'Creating...' : 'Create Share Link'}
+                        </button>
+                      ) : (
+                        <div className="space-y-3">
+                          <div className="p-3 bg-gray-700 rounded text-sm break-all">
+                            {shareLink}
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={handleCopyShareLink}
+                              className="flex-1 px-3 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded flex items-center justify-center gap-2"
+                            >
+                              <Copy size={14} />
+                              {copied ? 'Copied!' : 'Copy'}
+                            </button>
+                            <button
+                              onClick={() => window.open(shareLink, '_blank')}
+                              className="px-3 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded"
+                            >
+                              <ExternalLink size={14} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
+            )}
+
+            {/* Save Button */}
+            <button
+              onClick={handleSave}
+              disabled={saving || !selectedFile || !socketConnected}
+              className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded flex items-center gap-2 disabled:opacity-50"
+            >
+              <Save size={16} />
+              {saving ? 'Saving...' : (isSharedView && currentUser.role === 'collaborator' ? 'Request Save' : 'Save')}
+            </button>
+          </div>
+        </header>
+
+        {/* Editor */}
+        <div className="flex-1 p-4">
+          {selectedFile ? (
+            <div className="h-full">
+              <div className="mb-2 flex items-center gap-4 text-sm text-gray-400">
+                <span>Language: {language}</span>
+                {isSharedView && currentUser.role === 'collaborator' && (
+                  <span className="text-orange-400 flex items-center gap-1">
+                    <AlertTriangle size={12} />
+                    Changes require owner approval
+                  </span>
+                )}
+                <span className="text-xs">
+                  Socket: {socketConnected ? '🟢 Connected' : '🔴 Disconnected'}
+                </span>
+              </div>
+              <textarea
+                value={fileContent}
+                onChange={(e) => setFileContent(e.target.value)}
+                className="w-full h-full bg-gray-800 text-white p-4 rounded border border-gray-700 font-mono text-sm resize-none focus:outline-none focus:border-blue-500"
+                placeholder="Start editing your file..."
+                spellCheck={false}
+              />
             </div>
           ) : (
-            <div className="flex items-center justify-center h-full text-gray-500">
+            <div className="h-full flex items-center justify-center text-gray-400">
               <div className="text-center">
-                <File className="w-16 h-16 mx-auto mb-4 opacity-50" />
-                <h3 className="text-lg font-medium mb-2">No file selected</h3>
-                <p className="text-sm mb-4">Select a file from the sidebar to start editing</p>
-                {isSharedView && currentUser.role === 'collaborator' && (
-                  <div className="mt-4 p-3 bg-yellow-600/20 border border-yellow-600/30 rounded-lg max-w-md">
-                    <p className="text-sm text-yellow-200">
-                      💡 As a collaborator, your changes will need owner approval before being saved.
-                    </p>
-                  </div>
-                )}
-                {files.length === 0 && (
-                  <button 
-                    onClick={handleRefresh}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-md transition-colors text-sm font-medium"
-                  >
-                    <RefreshCw className="w-4 h-4 inline mr-2" />
-                    Refresh Files
-                  </button>
-                )}
+                <FileText size={48} className="mx-auto mb-4 opacity-50" />
+                <p className="mb-2">Select a file to start editing</p>
+                <p className="text-xs text-gray-500">
+                  Role: {currentUser.role} | Socket: {socketConnected ? 'Connected' : 'Disconnected'}
+                </p>
               </div>
             </div>
           )}
         </div>
-
-        {/* Enhanced Status Bar */}
-        <div className="bg-blue-600 text-white px-4 py-2 text-xs flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            {selectedFileObj && !selectedFileObj.isFolder && (
-              <>
-                <span>Ln 1, Col 1</span>
-                <span>UTF-8</span>
-                <span>{fileContent.split('\n').length} lines</span>
-                <span>{fileContent.length} characters</span>
-              </>
-            )}
-            {files.length > 0 && <span>{files.length} files loaded</span>}
-            {isSharedView && <span>🔗 Shared View</span>}
-            {currentUser.role === 'collaborator' && <span>👥 Collaborator Mode</span>}
-            {notifications.filter(n => n.type === 'change-pending').length > 0 && (
-              <span className="bg-orange-500 px-2 py-1 rounded">
-                {notifications.filter(n => n.type === 'change-pending').length} pending approval{notifications.filter(n => n.type === 'change-pending').length > 1 ? 's' : ''}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${
-              loading ? 'bg-yellow-400' : 
-              saving ? 'bg-orange-400' : 
-              sharing ? 'bg-purple-400' :
-              processingChange ? 'bg-blue-400' :
-              'bg-green-400'
-            }`}></span>
-            <span>
-              {loading ? 'Loading...' : 
-               saving ? (isSharedView && currentUser.role === 'collaborator' ? 'Requesting changes...' : 'Saving...') : 
-               sharing ? 'Creating share link...' :
-               processingChange ? 'Processing change...' :
-               'Ready'}
-            </span>
-            {socket && (
-              <>
-                <span className="mx-2">•</span>
-                <span className="text-green-300">Connected</span>
-              </>
-            )}
-          </div>
-        </div>
       </div>
     </div>
   );
-}
+};
 
 export default FileEditorPage;
